@@ -6,3 +6,4 @@ state.tmp
 sync.log
 .lock
 com.local.weight-sync.plist
+com.local.withings-garmin-sync.plist

@@ -1,7 +1,7 @@
-# weight-sync
+# withings-garmin-sync
 
-Pulls new weight measurements from Withings and posts them to Garmin Connect.
-Runs daily at 09:00 via launchd (edit `StartCalendarInterval` in the plist to change). Weight only, no body composition.
+Pulls new weight and body-composition measurements from Withings and posts them to Garmin Connect.
+Runs daily at 09:00 via launchd (edit `StartCalendarInterval` in the plist to change).
 
 ## Setup
 
@@ -56,6 +56,8 @@ Runs daily at 09:00 via launchd (edit `StartCalendarInterval` in the plist to ch
 - Withings rotates refresh tokens on every use. If `state.json` is lost or clobbered,
   run `sync.py auth` again.
 - `sync.py selftest` checks the parsing and token-persistence logic offline.
+- When the scale provides them, Garmin receives body-fat percentage, hydration percentage,
+  muscle mass, bone mass, visceral-fat rating, BMR, and metabolic age.
 
 ## License
 
