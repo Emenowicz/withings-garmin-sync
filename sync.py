@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Withings -> Garmin Connect weight sync.
+"""Withings -> Garmin Connect body-composition sync.
 
   ./sync.py auth       one-time OAuth bootstrap (browser)
   ./sync.py            push new weights (run from launchd)
@@ -93,16 +93,25 @@ def refresh(state):
 
 
 def parse_groups(groups):
-    """measuregrps -> ([(epoch, kg)] sorted, cursor). Pure; see selftest."""
-    weights, cursor = [], 0
+    """measuregrps -> ([(epoch, Garmin fields)] sorted, cursor). Pure; see selftest."""
+    readings, cursor = [], 0
     for g in groups:
         cursor = max(cursor, g.get("modified") or g["date"])
         if g.get("category") != 1:
-            continue  # category 2 is a weight *goal*, not a measurement
-        for m in g["measures"]:
-            if m["type"] == 1:
-                weights.append((g["date"], round(m["value"] * 10 ** m["unit"], 2)))
-    return sorted(weights), cursor
+            continue  # category 2 is a body-composition *goal*, not a measurement
+        measures = {m["type"]: m["value"] * 10 ** m["unit"] for m in g["measures"]}
+        if 1 not in measures:
+            continue  # Garmin requires weight for a body-composition entry
+        reading = {"weight": round(measures[1], 2)}
+        for measure_type, field in ((6, "percent_fat"), (76, "muscle_mass"),
+                                    (88, "bone_mass"), (170, "visceral_fat_rating"),
+                                    (226, "basal_met"), (227, "metabolic_age")):
+            if measure_type in measures:
+                reading[field] = round(measures[measure_type], 2)
+        if 77 in measures:
+            reading["percent_hydration"] = round(measures[77] / measures[1] * 100, 2)
+        readings.append((g["date"], reading))
+    return sorted(readings), cursor
 
 
 def new_weights(state):
@@ -111,7 +120,7 @@ def new_weights(state):
             f"{API}/measure",
             params={
                 "action": "getmeas",
-                "meastype": 1,
+                "meastypes": "1,6,76,77,88,170,226,227",
                 "category": 1,
                 "lastupdate": state["lastupdate"],
             },
@@ -122,16 +131,17 @@ def new_weights(state):
     return parse_groups(body["measuregrps"])
 
 
-def push(weights):
+def push(readings):
     from garminconnect import Garmin
 
     garmin = Garmin(cfg("GARMIN_EMAIL"), cfg("GARMIN_PASSWORD"),
                     prompt_mfa=lambda: input("Garmin MFA code: "))
     garmin.login(GARMIN_TOKENS)
-    for epoch, kg in weights:
+    for epoch, reading in readings:
         stamp = datetime.fromtimestamp(epoch)
-        garmin.add_weigh_in(kg, timestamp=stamp.isoformat())
-        print(f"{stamp:%Y-%m-%d %H:%M}  {kg} kg -> garmin")
+        garmin.add_body_composition(timestamp=stamp.isoformat(), **reading)
+        fields = ", ".join(k for k in reading if k != "weight") or "weight"
+        print(f"{stamp:%Y-%m-%d %H:%M}  {reading['weight']} kg ({fields}) -> garmin")
 
 
 def sync():
@@ -141,9 +151,9 @@ def sync():
     if not STATE.exists():
         sys.exit(f"no {STATE} — run `{sys.argv[0]} auth` first")
     state = refresh(json.loads(STATE.read_text()))
-    weights, cursor = new_weights(state)
-    if weights:
-        push(weights)
+    readings, cursor = new_weights(state)
+    if readings:
+        push(readings)
     else:
         print("no new weights")
     if cursor:
@@ -208,14 +218,25 @@ def selftest():
     groups = [
         {"date": 200, "modified": 900, "category": 1,
          "measures": [{"type": 1, "value": 7563, "unit": -2},
-                      {"type": 6, "value": 210, "unit": -1}]},
+                      {"type": 6, "value": 210, "unit": -1},
+                      {"type": 76, "value": 6000, "unit": -2},
+                      {"type": 77, "value": 4200, "unit": -2},
+                      {"type": 88, "value": 320, "unit": -2},
+                      {"type": 170, "value": 8, "unit": 0},
+                      {"type": 226, "value": 1800, "unit": 0},
+                      {"type": 227, "value": 35, "unit": 0}]},
         {"date": 100, "modified": 500, "category": 1,
          "measures": [{"type": 1, "value": 76, "unit": 0}]},
         {"date": 300, "modified": 1200, "category": 2,
          "measures": [{"type": 1, "value": 7000, "unit": -2}]},
     ]
-    weights, cursor = parse_groups(groups)
-    assert weights == [(100, 76.0), (200, 75.63)], weights  # sorted, fat% ignored
+    readings, cursor = parse_groups(groups)
+    assert readings == [
+        (100, {"weight": 76.0}),
+        (200, {"weight": 75.63, "percent_fat": 21.0, "muscle_mass": 60.0,
+               "percent_hydration": 55.53, "bone_mass": 3.2,
+               "visceral_fat_rating": 8, "basal_met": 1800, "metabolic_age": 35}),
+    ], readings
     assert cursor == 1200, cursor  # max modified, incl. groups we skipped
     assert parse_groups([{"date": 5, "category": 1, "measures": []}]) == ([], 5)
 
