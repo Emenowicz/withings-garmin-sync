@@ -115,20 +115,28 @@ def parse_groups(groups):
 
 
 def new_weights(state):
-    body = unwrap(
-        requests.get(
-            f"{API}/measure",
-            params={
-                "action": "getmeas",
-                "meastypes": "1,6,76,77,88,170,226,227",
-                "category": 1,
-                "lastupdate": state["lastupdate"],
-            },
-            headers={"Authorization": "Bearer " + state["access_token"]},
-            timeout=30,
+    groups, offsets = [], set()
+    params = {
+        "action": "getmeas",
+        "meastypes": "1,6,76,77,88,170,226,227",
+        "category": 1,
+        "lastupdate": state["lastupdate"],
+    }
+    while True:
+        body = unwrap(
+            requests.get(
+                f"{API}/measure", params=params,
+                headers={"Authorization": "Bearer " + state["access_token"]}, timeout=30,
+            )
         )
-    )
-    return parse_groups(body["measuregrps"])
+        groups.extend(body["measuregrps"])
+        if not body.get("more"):
+            return parse_groups(groups)
+        offset = body.get("offset")
+        if offset is None or offset in offsets:
+            sys.exit("withings returned an invalid pagination offset")
+        offsets.add(offset)
+        params["offset"] = offset
 
 
 def push(readings):
@@ -147,18 +155,19 @@ def push(readings):
 def sync():
     # ponytail: whole-run lock. Two syncs at once race the refresh-token rotation and
     # Withings kills the chain, forcing a manual re-auth.
-    fcntl.flock(open(HERE / ".lock", "w"), fcntl.LOCK_EX)
-    if not STATE.exists():
-        sys.exit(f"no {STATE} — run `{sys.argv[0]} auth` first")
-    state = refresh(json.loads(STATE.read_text()))
-    readings, cursor = new_weights(state)
-    if readings:
-        push(readings)
-    else:
-        print("no new weights")
-    if cursor:
-        state["lastupdate"] = cursor + 1
-        save(state)
+    with open(HERE / ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not STATE.exists():
+            sys.exit(f"no {STATE} — run `{sys.argv[0]} auth` first")
+        state = refresh(json.loads(STATE.read_text()))
+        readings, cursor = new_weights(state)
+        if readings:
+            push(readings)
+        else:
+            print("no new weights")
+        if cursor:
+            state["lastupdate"] = cursor + 1
+            save(state)
 
 
 def auth(pasted=None):
