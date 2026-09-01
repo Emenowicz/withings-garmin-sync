@@ -5,27 +5,32 @@ Runs daily at 09:00 via launchd (edit `StartCalendarInterval` in the plist to ch
 
 ## Setup
 
-1. **Withings credentials.** `.env` ships with `withings-sync`'s published app
-   credentials, so no registration is needed. They're shared across everyone using that
-   project — if Withings rate-limits them or the secret is rotated, register your own at
-   https://account.withings.com/partner/add_oauth2 and replace the three `WITHINGS_*`
-   values. Note Withings rejects `localhost` callbacks (it HEAD-checks the URL on save),
-   so a registration of your own needs a public HTTPS URL; `sync.py auth` handles both
-   that and a localhost callback.
+1. **Install dependencies.**
 
-2. **Garmin credentials.** Put `GARMIN_EMAIL` / `GARMIN_PASSWORD` in `.env`
+   ```sh
+   sh setup.sh
+   ```
+
+   This creates `.env` from the included example if needed.
+
+2. **Withings credentials.** Register an OAuth app at
+   https://account.withings.com/partner/add_oauth2 and put its three `WITHINGS_*` values
+   in `.env`. Note Withings rejects `localhost` callbacks (it HEAD-checks the URL on
+   save), so a registration of your own needs a public HTTPS URL; `sync.py auth` handles
+   both that and a localhost callback.
+
+3. **Garmin credentials.** Put `GARMIN_EMAIL` / `GARMIN_PASSWORD` in `.env`
    (`chmod 600`). Garmin has no official write API — `garminconnect` logs in like the
    mobile app. Unofficial, so Garmin can break it whenever they like.
 
-3. **Install and authorize:**
+4. **Authorize Withings:**
 
    ```sh
-   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
    .venv/bin/python sync.py auth                  # prints the authorize URL
    .venv/bin/python sync.py auth '<redirect URL>' # paste it back within ~30s
    ```
 
-4. **First sync must run in a real terminal** — Garmin asks for an emailed MFA code and
+5. **First sync must run in a real terminal** — Garmin asks for an emailed MFA code and
    there's no way to type it from a non-interactive shell:
 
    ```sh
@@ -35,12 +40,10 @@ Runs daily at 09:00 via launchd (edit `StartCalendarInterval` in the plist to ch
    Tokens then cache in `~/.garminconnect` and every later run is unattended.
    Repeated login attempts get you a 429 IP rate limit from Garmin; wait it out.
 
-5. **Schedule it:**
+6. **Schedule it:**
 
    ```sh
-   cp com.local.weight-sync.plist.example ~/Library/LaunchAgents/com.local.weight-sync.plist
-   # Replace /Users/YOU/path/to/weight-sync in the copied file with the project path.
-   launchctl load -w ~/Library/LaunchAgents/com.local.weight-sync.plist
+   sh setup.sh --launchd
    tail -f sync.log
    ```
 
