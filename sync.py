@@ -58,22 +58,45 @@ def redirect_uri():
     return cfg("WITHINGS_REDIRECT")
 
 
+def redirect_valid(value):
+    parsed = urlparse(value)
+    local_http = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1")
+    return bool(parsed.netloc) and (parsed.scheme == "https" or local_http)
+
+
+def write_private(path, contents):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(contents)
+
+
 def configure():
     values = dict(_env)
     print("Enter credentials (press Enter to keep an existing value).")
     for key, label, secret in CONFIG_FIELDS:
         current = values.get(key, "")
         hint = " [configured]" if current else ""
-        prompt = f"{label}{hint}: "
-        value = getpass.getpass(prompt) if secret else input(prompt)
-        value = value or current
-        if not value:
-            sys.exit(f"{label} is required")
-        if "\n" in value or "\r" in value:
-            sys.exit(f"{label} cannot contain a newline")
+        while True:
+            try:
+                prompt = f"{label}{hint}: "
+                value = getpass.getpass(prompt) if secret else input(prompt)
+            except (EOFError, KeyboardInterrupt):
+                sys.exit("\nconfiguration cancelled")
+            value = value or current
+            if not value:
+                print(f"{label} is required")
+                continue
+            if "\n" in value or "\r" in value:
+                print(f"{label} cannot contain a newline")
+                continue
+            if key == "WITHINGS_REDIRECT" and not redirect_valid(value):
+                print("Use a public https:// URL or local http://localhost URL")
+                continue
+            break
         values[key] = value
-    ENV.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
-    ENV.chmod(0o600)
+    write_private(ENV, "".join(f"{key}={value}\n" for key, value in values.items()))
     print(f"saved {ENV}")
 
 
@@ -96,10 +119,7 @@ def doctor():
         report(bool(os.environ.get(key) or _env.get(key)), f"{label} configured")
 
     redirect = os.environ.get("WITHINGS_REDIRECT") or _env.get("WITHINGS_REDIRECT", "")
-    parsed = urlparse(redirect)
-    local_http = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1")
-    report(bool(parsed.netloc) and (parsed.scheme == "https" or local_http),
-           "Withings redirect URL is public HTTPS or local HTTP")
+    report(redirect_valid(redirect), "Withings redirect URL is public HTTPS or local HTTP")
 
     try:
         state = json.loads(STATE.read_text())
@@ -125,8 +145,7 @@ def extract_code(pasted, expected_state):
 
 def save(state):
     tmp = STATE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
-    tmp.chmod(0o600)
+    write_private(tmp, json.dumps(state, indent=2))
     os.replace(tmp, STATE)
 
 
@@ -283,8 +302,7 @@ def auth(pasted=None):
         )
         local_callback = urlparse(redirect).hostname in ("localhost", "127.0.0.1")
         if not local_callback:
-            AUTH_STATE.write_text(oauth_state)
-            AUTH_STATE.chmod(0o600)
+            write_private(AUTH_STATE, oauth_state)
         print(f"authorize here:\n{url}\n")
         webbrowser.open(url)
         if not local_callback:
@@ -373,6 +391,10 @@ def selftest():
         "localhost", 8765, "/oauth/callback"
     )
     assert callback_address("http://127.0.0.1") == ("127.0.0.1", 80, "/")
+    assert redirect_valid("https://example.com/oauth/callback")
+    assert redirect_valid("http://localhost:8080")
+    assert not redirect_valid("http://example.com/oauth/callback")
+    assert not redirect_valid("not-a-url")
     try:
         extract_code("https://x.dev/cb?code=abc123&state=wrong", "random")
         assert False, "mismatched OAuth state accepted"
