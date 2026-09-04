@@ -1,6 +1,7 @@
 #!/bin/sh
 # Guided setup. Add --launchd to install the daily macOS job too.
 set -eu
+umask 077
 
 case "${1:-}" in
   "") install_launchd=false ;;
