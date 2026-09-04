@@ -59,8 +59,9 @@ rate limit.
 - `state.json` holds the Withings tokens and the `lastupdate` cursor — that's the
   whole database. `auth` starts the cursor at *now*; to backfill, lower `lastupdate`
   to an epoch timestamp and run the sync. All result pages are fetched automatically.
-- Successfully uploaded measurement IDs are checkpointed in `state.json`, so a partial
-  Garmin failure can resume without replaying earlier entries.
+- Successfully uploaded Withings group IDs are retained in `state.json`, so partial
+  failures and later edits cannot create duplicate Garmin entries. Because Garmin has no
+  safe update-by-source-ID operation, an edit made in Withings after upload is skipped.
 - Withings rotates refresh tokens on every use. If `state.json` is lost or clobbered,
   run `sync.py auth` again.
 - `sync.py selftest` checks the parsing and token-persistence logic offline.

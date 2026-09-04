@@ -162,7 +162,7 @@ def refresh(state):
 
 
 def parse_groups(groups):
-    """measuregrps -> ([(epoch, id, Garmin fields)] sorted, cursor)."""
+    """measuregrps -> ([(epoch, stable ID, Garmin fields)] sorted, cursor)."""
     readings, cursor = [], 0
     for g in groups:
         modified = g.get("modified") or g["date"]
@@ -180,7 +180,7 @@ def parse_groups(groups):
                 reading[field] = round(measures[measure_type], 2)
         if 77 in measures:
             reading["percent_hydration"] = round(measures[77] / measures[1] * 100, 2)
-        readings.append((g["date"], f"{g['grpid']}:{modified}", reading))
+        readings.append((g["date"], str(g["grpid"]), reading))
     return sorted(readings), cursor
 
 
@@ -222,7 +222,7 @@ def garmin_login():
 
 def push(readings, state):
     garmin = garmin_login()
-    uploaded = set(state.get("uploaded", []))
+    uploaded = uploaded_ids(state)
     for epoch, reading_id, reading in readings:
         stamp = datetime.fromtimestamp(epoch)
         garmin.add_body_composition(timestamp=stamp.isoformat(), **reading)
@@ -234,15 +234,14 @@ def push(readings, state):
 
 
 def pending_readings(readings, state):
-    uploaded = set(state.get("uploaded", []))
+    uploaded = uploaded_ids(state)
     return [reading for reading in readings if reading[1] not in uploaded]
 
 
-def prune_uploaded(state, cursor):
-    state["uploaded"] = [
-        key for key in state.get("uploaded", [])
-        if int(key.rsplit(":", 1)[1]) >= cursor - 1
-    ]
+def uploaded_ids(state):
+    # v0.1.1 stored "grpid:modified" near the cursor. Keep the stable part while
+    # migrating so later Withings edits cannot create duplicate Garmin entries.
+    return {str(key).split(":", 1)[0] for key in state.get("uploaded", [])}
 
 
 def sync():
@@ -261,7 +260,7 @@ def sync():
             print("no new weights")
         if cursor:
             state["lastupdate"] = cursor
-            prune_uploaded(state, cursor)
+            state["uploaded"] = sorted(uploaded_ids(state))
             save(state)
 
 
@@ -358,8 +357,8 @@ def selftest():
     ]
     readings, cursor = parse_groups(groups)
     assert readings == [
-        (100, "10:500", {"weight": 76.0}),
-        (200, "20:900", {"weight": 75.63, "percent_fat": 21.0, "muscle_mass": 60.0,
+        (100, "10", {"weight": 76.0}),
+        (200, "20", {"weight": 75.63, "percent_fat": 21.0, "muscle_mass": 60.0,
                "percent_hydration": 55.53, "bone_mass": 3.2,
                "visceral_fat_rating": 8, "basal_met": 1800, "metabolic_age": 35}),
     ], readings
@@ -367,9 +366,7 @@ def selftest():
     assert parse_groups([{"grpid": 1, "date": 5, "category": 1,
                           "measures": []}]) == ([], 5)
     assert pending_readings(readings, {"uploaded": ["10:500"]}) == [readings[1]]
-    ledger = {"uploaded": ["10:500", "20:900"]}
-    prune_uploaded(ledger, 900)
-    assert ledger == {"uploaded": ["20:900"]}
+    assert uploaded_ids({"uploaded": ["10:500", "20", 30]}) == {"10", "20", "30"}
 
     assert extract_code("https://x.dev/cb?code=abc123&state=random", "random") == "abc123"
     assert callback_address("http://localhost:8765/oauth/callback") == (
