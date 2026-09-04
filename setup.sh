@@ -1,6 +1,7 @@
 #!/bin/sh
-# Install dependencies. Add --launchd to install the daily macOS job too.
+# Guided setup. Add --launchd to install the daily macOS job too.
 set -eu
+umask 077
 
 case "${1:-}" in
   "") install_launchd=false ;;
@@ -16,8 +17,22 @@ python3 -m venv .venv
 
 if [ ! -e .env ]; then
   cp .env.example .env
-  chmod 600 .env
-  echo "Created .env. Fill in your Withings and Garmin credentials before authorizing."
+fi
+chmod 600 .env
+
+if [ -t 0 ]; then
+  .venv/bin/python sync.py configure
+  if [ ! -e state.json ]; then
+    .venv/bin/python sync.py auth
+  else
+    echo "Withings is already authorized; keeping state.json."
+  fi
+  echo "Testing Garmin login (MFA may be requested)..."
+  .venv/bin/python sync.py garmin-auth
+  echo "Running the first synchronization..."
+  .venv/bin/python sync.py sync
+else
+  echo "No interactive terminal; using the existing configuration."
 fi
 
 if "$install_launchd"; then
@@ -36,4 +51,5 @@ if "$install_launchd"; then
   echo "Installed daily launchd job: $agent"
 fi
 
-echo "Next: edit .env, then run .venv/bin/python sync.py auth"
+.venv/bin/python sync.py doctor
+echo "Setup complete. Check health any time with: .venv/bin/python sync.py doctor"

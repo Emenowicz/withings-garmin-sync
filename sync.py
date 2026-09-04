@@ -7,6 +7,7 @@
 """
 
 import fcntl
+import getpass
 import json
 import os
 import secrets
@@ -26,6 +27,13 @@ AUTH_STATE = HERE / ".auth-state"
 ENV = HERE / ".env"
 API = "https://wbsapi.withings.net"
 GARMIN_TOKENS = os.path.expanduser("~/.garminconnect")
+CONFIG_FIELDS = (
+    ("WITHINGS_CLIENT_ID", "Withings client ID", False),
+    ("WITHINGS_SECRET", "Withings client secret", True),
+    ("WITHINGS_REDIRECT", "Withings redirect URL", False),
+    ("GARMIN_EMAIL", "Garmin email", False),
+    ("GARMIN_PASSWORD", "Garmin password", True),
+)
 
 # ponytail: 3-line .env parser instead of python-dotenv. launchd runs with an empty
 # environment, so shell exports are invisible to the scheduled job.
@@ -47,7 +55,82 @@ def cfg(key, default=None):
 
 def redirect_uri():
     """Must match the callback registered in the Withings dashboard, exactly."""
-    return cfg("WITHINGS_REDIRECT", "http://localhost:8080")
+    return cfg("WITHINGS_REDIRECT")
+
+
+def redirect_valid(value):
+    parsed = urlparse(value)
+    local_http = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1")
+    return bool(parsed.netloc) and (parsed.scheme == "https" or local_http)
+
+
+def write_private(path, contents):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(contents)
+
+
+def configure():
+    values = dict(_env)
+    print("Enter credentials (press Enter to keep an existing value).")
+    for key, label, secret in CONFIG_FIELDS:
+        current = values.get(key, "")
+        hint = " [configured]" if current else ""
+        while True:
+            try:
+                prompt = f"{label}{hint}: "
+                value = getpass.getpass(prompt) if secret else input(prompt)
+            except (EOFError, KeyboardInterrupt):
+                sys.exit("\nconfiguration cancelled")
+            value = value or current
+            if not value:
+                print(f"{label} is required")
+                continue
+            if "\n" in value or "\r" in value:
+                print(f"{label} cannot contain a newline")
+                continue
+            if key == "WITHINGS_REDIRECT" and not redirect_valid(value):
+                print("Use a public https:// URL or local http://localhost URL")
+                continue
+            break
+        values[key] = value
+    write_private(ENV, "".join(f"{key}={value}\n" for key, value in values.items()))
+    print(f"saved {ENV}")
+
+
+def doctor():
+    problems = 0
+
+    def report(ok, message, optional=False):
+        nonlocal problems
+        status = "ok" if ok else "skip" if optional else "missing"
+        suffix = " (optional)" if optional and not ok else ""
+        print(f"[{status}] {message}{suffix}")
+        if not ok and not optional:
+            problems += 1
+
+    report(sys.version_info >= (3, 9), f"Python {sys.version.split()[0]} (3.9+ required)")
+    report(ENV.exists(), ".env exists")
+    if ENV.exists():
+        report(ENV.stat().st_mode & 0o077 == 0, ".env permissions are private")
+    for key, label, _ in CONFIG_FIELDS:
+        report(bool(os.environ.get(key) or _env.get(key)), f"{label} configured")
+
+    redirect = os.environ.get("WITHINGS_REDIRECT") or _env.get("WITHINGS_REDIRECT", "")
+    report(redirect_valid(redirect), "Withings redirect URL is public HTTPS or local HTTP")
+
+    try:
+        state = json.loads(STATE.read_text())
+        withings_ready = all(state.get(key) for key in ("access_token", "refresh_token", "lastupdate"))
+    except (OSError, ValueError, AttributeError):
+        withings_ready = False
+    report(withings_ready, "Withings authorization completed")
+    report(Path(GARMIN_TOKENS).exists(), "Garmin login cached")
+    report(Path.home().joinpath("Library/LaunchAgents/com.local.withings-garmin-sync.plist").exists(),
+           "daily launchd job", optional=True)
+    return not problems
 
 
 def extract_code(pasted, expected_state):
@@ -62,8 +145,7 @@ def extract_code(pasted, expected_state):
 
 def save(state):
     tmp = STATE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
-    tmp.chmod(0o600)
+    write_private(tmp, json.dumps(state, indent=2))
     os.replace(tmp, STATE)
 
 
@@ -99,7 +181,7 @@ def refresh(state):
 
 
 def parse_groups(groups):
-    """measuregrps -> ([(epoch, id, Garmin fields)] sorted, cursor)."""
+    """measuregrps -> ([(epoch, stable ID, Garmin fields)] sorted, cursor)."""
     readings, cursor = [], 0
     for g in groups:
         modified = g.get("modified") or g["date"]
@@ -117,7 +199,7 @@ def parse_groups(groups):
                 reading[field] = round(measures[measure_type], 2)
         if 77 in measures:
             reading["percent_hydration"] = round(measures[77] / measures[1] * 100, 2)
-        readings.append((g["date"], f"{g['grpid']}:{modified}", reading))
+        readings.append((g["date"], str(g["grpid"]), reading))
     return sorted(readings), cursor
 
 
@@ -148,13 +230,18 @@ def new_weights(state):
         params["offset"] = offset
 
 
-def push(readings, state):
+def garmin_login():
     from garminconnect import Garmin
 
     garmin = Garmin(cfg("GARMIN_EMAIL"), cfg("GARMIN_PASSWORD"),
                     prompt_mfa=lambda: input("Garmin MFA code: "))
     garmin.login(GARMIN_TOKENS)
-    uploaded = set(state.get("uploaded", []))
+    return garmin
+
+
+def push(readings, state):
+    garmin = garmin_login()
+    uploaded = uploaded_ids(state)
     for epoch, reading_id, reading in readings:
         stamp = datetime.fromtimestamp(epoch)
         garmin.add_body_composition(timestamp=stamp.isoformat(), **reading)
@@ -166,15 +253,14 @@ def push(readings, state):
 
 
 def pending_readings(readings, state):
-    uploaded = set(state.get("uploaded", []))
+    uploaded = uploaded_ids(state)
     return [reading for reading in readings if reading[1] not in uploaded]
 
 
-def prune_uploaded(state, cursor):
-    state["uploaded"] = [
-        key for key in state.get("uploaded", [])
-        if int(key.rsplit(":", 1)[1]) >= cursor - 1
-    ]
+def uploaded_ids(state):
+    # v0.1.1 stored "grpid:modified" near the cursor. Keep the stable part while
+    # migrating so later Withings edits cannot create duplicate Garmin entries.
+    return {str(key).split(":", 1)[0] for key in state.get("uploaded", [])}
 
 
 def sync():
@@ -193,7 +279,7 @@ def sync():
             print("no new weights")
         if cursor:
             state["lastupdate"] = cursor
-            prune_uploaded(state, cursor)
+            state["uploaded"] = sorted(uploaded_ids(state))
             save(state)
 
 
@@ -216,13 +302,14 @@ def auth(pasted=None):
         )
         local_callback = urlparse(redirect).hostname in ("localhost", "127.0.0.1")
         if not local_callback:
-            AUTH_STATE.write_text(oauth_state)
-            AUTH_STATE.chmod(0o600)
+            write_private(AUTH_STATE, oauth_state)
         print(f"authorize here:\n{url}\n")
         webbrowser.open(url)
         if not local_callback:
-            sys.exit(f"then, within ~30s:\n  {sys.argv[0]} auth '<the redirect URL>'")
-        code = catch_code(oauth_state)
+            pasted = input("After authorizing, paste the final redirect URL here:\n> ")
+            code = extract_code(pasted, oauth_state)
+        else:
+            code = catch_code(oauth_state, redirect)
 
     state = token(
         grant_type="authorization_code", code=code, redirect_uri=redirect
@@ -235,12 +322,24 @@ def auth(pasted=None):
     print(f"wrote {STATE}")
 
 
-def catch_code(expected_state):
+def callback_address(redirect):
+    parsed = urlparse(redirect)
+    if parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1"):
+        sys.exit("local Withings callback must use http://localhost or http://127.0.0.1")
+    return parsed.hostname, parsed.port or 80, parsed.path or "/"
+
+
+def catch_code(expected_state, redirect):
     query = {}
+    host, port, expected_path = callback_address(redirect)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            query.update(parse_qs(urlparse(self.path).query))
+            request = urlparse(self.path)
+            if request.path != expected_path:
+                self.send_error(404)
+                return
+            query.update(parse_qs(request.query))
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"ok, close this tab")
@@ -248,7 +347,7 @@ def catch_code(expected_state):
         def log_message(self, *_):
             pass
 
-    with HTTPServer(("localhost", 8080), Handler) as server:
+    with HTTPServer((host, port), Handler) as server:
         while not query:
             server.handle_request()
     if "code" not in query:
@@ -276,8 +375,8 @@ def selftest():
     ]
     readings, cursor = parse_groups(groups)
     assert readings == [
-        (100, "10:500", {"weight": 76.0}),
-        (200, "20:900", {"weight": 75.63, "percent_fat": 21.0, "muscle_mass": 60.0,
+        (100, "10", {"weight": 76.0}),
+        (200, "20", {"weight": 75.63, "percent_fat": 21.0, "muscle_mass": 60.0,
                "percent_hydration": 55.53, "bone_mass": 3.2,
                "visceral_fat_rating": 8, "basal_met": 1800, "metabolic_age": 35}),
     ], readings
@@ -285,11 +384,17 @@ def selftest():
     assert parse_groups([{"grpid": 1, "date": 5, "category": 1,
                           "measures": []}]) == ([], 5)
     assert pending_readings(readings, {"uploaded": ["10:500"]}) == [readings[1]]
-    ledger = {"uploaded": ["10:500", "20:900"]}
-    prune_uploaded(ledger, 900)
-    assert ledger == {"uploaded": ["20:900"]}
+    assert uploaded_ids({"uploaded": ["10:500", "20", 30]}) == {"10", "20", "30"}
 
     assert extract_code("https://x.dev/cb?code=abc123&state=random", "random") == "abc123"
+    assert callback_address("http://localhost:8765/oauth/callback") == (
+        "localhost", 8765, "/oauth/callback"
+    )
+    assert callback_address("http://127.0.0.1") == ("127.0.0.1", 80, "/")
+    assert redirect_valid("https://example.com/oauth/callback")
+    assert redirect_valid("http://localhost:8080")
+    assert not redirect_valid("http://example.com/oauth/callback")
+    assert not redirect_valid("not-a-url")
     try:
         extract_code("https://x.dev/cb?code=abc123&state=wrong", "random")
         assert False, "mismatched OAuth state accepted"
@@ -311,10 +416,22 @@ def selftest():
 
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    if cmd == "auth":
-        auth(*sys.argv[2:3])
-    elif cmd == "selftest":
-        selftest()
-    else:
+    args = sys.argv[1:]
+    if not args or args == ["sync"]:
         sync()
+    elif args[0] == "auth" and len(args) <= 2:
+        auth(*sys.argv[2:3])
+    elif args == ["selftest"]:
+        selftest()
+    elif args == ["configure"]:
+        configure()
+    elif args == ["garmin-auth"]:
+        garmin_login()
+        print(f"Garmin login cached in {GARMIN_TOKENS}")
+    elif args == ["doctor"]:
+        sys.exit(0 if doctor() else 1)
+    else:
+        sys.exit(
+            f"usage: {sys.argv[0]} "
+            "[sync | auth [redirect-url] | garmin-auth | configure | doctor | selftest]"
+        )
