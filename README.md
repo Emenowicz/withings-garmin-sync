@@ -51,8 +51,9 @@ Runs daily at 09:00 via launchd (edit `StartCalendarInterval` in the plist to ch
 
 - `state.json` holds the Withings tokens and the `lastupdate` cursor — that's the
   whole database. `auth` starts the cursor at *now*; to backfill, lower `lastupdate`
-  to an epoch timestamp and run the sync. Each run fetches one page (~200 groups) — for
-  years of history, lower `lastupdate` in steps rather than all at once.
+  to an epoch timestamp and run the sync. All result pages are fetched automatically.
+- Successfully uploaded measurement IDs are checkpointed in `state.json`, so a partial
+  Garmin failure can resume without replaying earlier entries.
 - Withings rotates refresh tokens on every use. If `state.json` is lost or clobbered,
   run `sync.py auth` again.
 - `sync.py selftest` checks the parsing and token-persistence logic offline.
