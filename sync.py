@@ -9,6 +9,7 @@
 import fcntl
 import json
 import os
+import secrets
 import sys
 import time
 import webbrowser
@@ -21,6 +22,7 @@ import requests
 
 HERE = Path(__file__).resolve().parent
 STATE = HERE / "state.json"
+AUTH_STATE = HERE / ".auth-state"
 ENV = HERE / ".env"
 API = "https://wbsapi.withings.net"
 GARMIN_TOKENS = os.path.expanduser("~/.garminconnect")
@@ -48,10 +50,14 @@ def redirect_uri():
     return cfg("WITHINGS_REDIRECT", "http://localhost:8080")
 
 
-def extract_code(pasted):
-    """Accept a bare code or the whole redirect URL pasted from the address bar."""
+def extract_code(pasted, expected_state):
+    """Validate an OAuth redirect URL and return its authorization code."""
     query = parse_qs(urlparse(pasted.strip()).query)
-    return query["code"][0] if "code" in query else pasted.strip()
+    if query.get("state") != [expected_state]:
+        sys.exit("invalid OAuth state — run auth again and paste the whole redirect URL")
+    if "code" not in query:
+        sys.exit(f"no code in OAuth redirect: {query}")
+    return query["code"][0]
 
 
 def save(state):
@@ -93,10 +99,11 @@ def refresh(state):
 
 
 def parse_groups(groups):
-    """measuregrps -> ([(epoch, Garmin fields)] sorted, cursor). Pure; see selftest."""
+    """measuregrps -> ([(epoch, id, Garmin fields)] sorted, cursor)."""
     readings, cursor = [], 0
     for g in groups:
-        cursor = max(cursor, g.get("modified") or g["date"])
+        modified = g.get("modified") or g["date"]
+        cursor = max(cursor, modified)
         if g.get("category") != 1:
             continue  # category 2 is a body-composition *goal*, not a measurement
         measures = {m["type"]: m["value"] * 10 ** m["unit"] for m in g["measures"]}
@@ -110,7 +117,7 @@ def parse_groups(groups):
                 reading[field] = round(measures[measure_type], 2)
         if 77 in measures:
             reading["percent_hydration"] = round(measures[77] / measures[1] * 100, 2)
-        readings.append((g["date"], reading))
+        readings.append((g["date"], f"{g['grpid']}:{modified}", reading))
     return sorted(readings), cursor
 
 
@@ -120,7 +127,9 @@ def new_weights(state):
         "action": "getmeas",
         "meastypes": "1,6,76,77,88,170,226,227",
         "category": 1,
-        "lastupdate": state["lastupdate"],
+        # Re-read the boundary second. This also repairs cursors written by versions
+        # that incorrectly stored max(modified) + 1.
+        "lastupdate": max(0, state["lastupdate"] - 1),
     }
     while True:
         body = unwrap(
@@ -139,17 +148,33 @@ def new_weights(state):
         params["offset"] = offset
 
 
-def push(readings):
+def push(readings, state):
     from garminconnect import Garmin
 
     garmin = Garmin(cfg("GARMIN_EMAIL"), cfg("GARMIN_PASSWORD"),
                     prompt_mfa=lambda: input("Garmin MFA code: "))
     garmin.login(GARMIN_TOKENS)
-    for epoch, reading in readings:
+    uploaded = set(state.get("uploaded", []))
+    for epoch, reading_id, reading in readings:
         stamp = datetime.fromtimestamp(epoch)
         garmin.add_body_composition(timestamp=stamp.isoformat(), **reading)
+        uploaded.add(reading_id)
+        state["uploaded"] = sorted(uploaded)
+        save(state)  # resume after a partial Garmin failure without replaying successes
         fields = ", ".join(k for k in reading if k != "weight") or "weight"
         print(f"{stamp:%Y-%m-%d %H:%M}  {reading['weight']} kg ({fields}) -> garmin")
+
+
+def pending_readings(readings, state):
+    uploaded = set(state.get("uploaded", []))
+    return [reading for reading in readings if reading[1] not in uploaded]
+
+
+def prune_uploaded(state, cursor):
+    state["uploaded"] = [
+        key for key in state.get("uploaded", [])
+        if int(key.rsplit(":", 1)[1]) >= cursor - 1
+    ]
 
 
 def sync():
@@ -161,36 +186,43 @@ def sync():
             sys.exit(f"no {STATE} — run `{sys.argv[0]} auth` first")
         state = refresh(json.loads(STATE.read_text()))
         readings, cursor = new_weights(state)
+        readings = pending_readings(readings, state)
         if readings:
-            push(readings)
+            push(readings, state)
         else:
             print("no new weights")
         if cursor:
-            state["lastupdate"] = cursor + 1
+            state["lastupdate"] = cursor
+            prune_uploaded(state, cursor)
             save(state)
 
 
 def auth(pasted=None):
     redirect = redirect_uri()
-    url = "https://account.withings.com/oauth2_user/authorize2?" + urlencode(
-        {
-            "response_type": "code",
-            "client_id": cfg("WITHINGS_CLIENT_ID"),
-            "scope": "user.metrics",
-            "redirect_uri": redirect,
-            "state": "weight-sync",
-        }
-    )
-    # Withings rejects localhost callbacks for some app types. With a public https
-    # callback we can't catch the redirect, so the code comes back as an argument.
     if pasted:
-        code = extract_code(pasted)
+        if not AUTH_STATE.exists():
+            sys.exit(f"no pending OAuth flow — run `{sys.argv[0]} auth` first")
+        code = extract_code(pasted, AUTH_STATE.read_text().strip())
     else:
+        oauth_state = secrets.token_urlsafe(24)
+        url = "https://account.withings.com/oauth2_user/authorize2?" + urlencode(
+            {
+                "response_type": "code",
+                "client_id": cfg("WITHINGS_CLIENT_ID"),
+                "scope": "user.metrics",
+                "redirect_uri": redirect,
+                "state": oauth_state,
+            }
+        )
+        local_callback = urlparse(redirect).hostname in ("localhost", "127.0.0.1")
+        if not local_callback:
+            AUTH_STATE.write_text(oauth_state)
+            AUTH_STATE.chmod(0o600)
         print(f"authorize here:\n{url}\n")
         webbrowser.open(url)
-        if urlparse(redirect).hostname not in ("localhost", "127.0.0.1"):
+        if not local_callback:
             sys.exit(f"then, within ~30s:\n  {sys.argv[0]} auth '<the redirect URL>'")
-        code = catch_code()
+        code = catch_code(oauth_state)
 
     state = token(
         grant_type="authorization_code", code=code, redirect_uri=redirect
@@ -199,10 +231,11 @@ def auth(pasted=None):
     # scale history into Garmin. Backfill by lowering lastupdate in state.json.
     state["lastupdate"] = int(time.time())
     save(state)
+    AUTH_STATE.unlink(missing_ok=True)
     print(f"wrote {STATE}")
 
 
-def catch_code():
+def catch_code(expected_state):
     query = {}
 
     class Handler(BaseHTTPRequestHandler):
@@ -220,12 +253,14 @@ def catch_code():
             server.handle_request()
     if "code" not in query:
         sys.exit(f"no code in callback: {query}")
+    if query.get("state") != [expected_state]:
+        sys.exit("invalid OAuth state")
     return query["code"][0]
 
 
 def selftest():
     groups = [
-        {"date": 200, "modified": 900, "category": 1,
+        {"grpid": 20, "date": 200, "modified": 900, "category": 1,
          "measures": [{"type": 1, "value": 7563, "unit": -2},
                       {"type": 6, "value": 210, "unit": -1},
                       {"type": 76, "value": 6000, "unit": -2},
@@ -234,23 +269,32 @@ def selftest():
                       {"type": 170, "value": 8, "unit": 0},
                       {"type": 226, "value": 1800, "unit": 0},
                       {"type": 227, "value": 35, "unit": 0}]},
-        {"date": 100, "modified": 500, "category": 1,
+        {"grpid": 10, "date": 100, "modified": 500, "category": 1,
          "measures": [{"type": 1, "value": 76, "unit": 0}]},
-        {"date": 300, "modified": 1200, "category": 2,
+        {"grpid": 30, "date": 300, "modified": 1200, "category": 2,
          "measures": [{"type": 1, "value": 7000, "unit": -2}]},
     ]
     readings, cursor = parse_groups(groups)
     assert readings == [
-        (100, {"weight": 76.0}),
-        (200, {"weight": 75.63, "percent_fat": 21.0, "muscle_mass": 60.0,
+        (100, "10:500", {"weight": 76.0}),
+        (200, "20:900", {"weight": 75.63, "percent_fat": 21.0, "muscle_mass": 60.0,
                "percent_hydration": 55.53, "bone_mass": 3.2,
                "visceral_fat_rating": 8, "basal_met": 1800, "metabolic_age": 35}),
     ], readings
     assert cursor == 1200, cursor  # max modified, incl. groups we skipped
-    assert parse_groups([{"date": 5, "category": 1, "measures": []}]) == ([], 5)
+    assert parse_groups([{"grpid": 1, "date": 5, "category": 1,
+                          "measures": []}]) == ([], 5)
+    assert pending_readings(readings, {"uploaded": ["10:500"]}) == [readings[1]]
+    ledger = {"uploaded": ["10:500", "20:900"]}
+    prune_uploaded(ledger, 900)
+    assert ledger == {"uploaded": ["20:900"]}
 
-    assert extract_code("https://x.dev/cb?code=abc123&state=weight-sync") == "abc123"
-    assert extract_code("  abc123 ") == "abc123"
+    assert extract_code("https://x.dev/cb?code=abc123&state=random", "random") == "abc123"
+    try:
+        extract_code("https://x.dev/cb?code=abc123&state=wrong", "random")
+        assert False, "mismatched OAuth state accepted"
+    except SystemExit:
+        pass
 
     global STATE
     STATE = HERE / "state.selftest.json"

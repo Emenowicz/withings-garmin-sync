@@ -28,7 +28,7 @@ if "$install_launchd"; then
   launchctl bootout "gui/$(id -u)/com.local.weight-sync" 2>/dev/null || true
   agent="$HOME/Library/LaunchAgents/com.local.withings-garmin-sync.plist"
   mkdir -p "$(dirname "$agent")"
-  sed "s|/Users/YOU/path/to/weight-sync|$project_dir|g" \
+  sed "s|/Users/YOU/path/to/withings-garmin-sync|$project_dir|g" \
     com.local.withings-garmin-sync.plist.example > "$agent"
   plutil -lint "$agent"
   launchctl bootout "gui/$(id -u)" "$agent" 2>/dev/null || true
