@@ -19,5 +19,10 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python sync.py selftest
       - run: python -m py_compile sync.py
+      - name: Reject unknown commands
+        run: |
+          if python sync.py typo; then
+            exit 1
+          fi
       - run: sh -n setup.sh
       - run: plutil -lint com.local.withings-garmin-sync.plist.example
