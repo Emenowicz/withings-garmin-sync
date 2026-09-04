@@ -7,6 +7,7 @@
 """
 
 import fcntl
+import getpass
 import json
 import os
 import secrets
@@ -26,6 +27,13 @@ AUTH_STATE = HERE / ".auth-state"
 ENV = HERE / ".env"
 API = "https://wbsapi.withings.net"
 GARMIN_TOKENS = os.path.expanduser("~/.garminconnect")
+CONFIG_FIELDS = (
+    ("WITHINGS_CLIENT_ID", "Withings client ID", False),
+    ("WITHINGS_SECRET", "Withings client secret", True),
+    ("WITHINGS_REDIRECT", "Withings redirect URL", False),
+    ("GARMIN_EMAIL", "Garmin email", False),
+    ("GARMIN_PASSWORD", "Garmin password", True),
+)
 
 # ponytail: 3-line .env parser instead of python-dotenv. launchd runs with an empty
 # environment, so shell exports are invisible to the scheduled job.
@@ -47,7 +55,62 @@ def cfg(key, default=None):
 
 def redirect_uri():
     """Must match the callback registered in the Withings dashboard, exactly."""
-    return cfg("WITHINGS_REDIRECT", "http://localhost:8080")
+    return cfg("WITHINGS_REDIRECT")
+
+
+def configure():
+    values = dict(_env)
+    print("Enter credentials (press Enter to keep an existing value).")
+    for key, label, secret in CONFIG_FIELDS:
+        current = values.get(key, "")
+        hint = " [configured]" if current else ""
+        prompt = f"{label}{hint}: "
+        value = getpass.getpass(prompt) if secret else input(prompt)
+        value = value or current
+        if not value:
+            sys.exit(f"{label} is required")
+        if "\n" in value or "\r" in value:
+            sys.exit(f"{label} cannot contain a newline")
+        values[key] = value
+    ENV.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
+    ENV.chmod(0o600)
+    print(f"saved {ENV}")
+
+
+def doctor():
+    problems = 0
+
+    def report(ok, message, optional=False):
+        nonlocal problems
+        status = "ok" if ok else "skip" if optional else "missing"
+        suffix = " (optional)" if optional and not ok else ""
+        print(f"[{status}] {message}{suffix}")
+        if not ok and not optional:
+            problems += 1
+
+    report(sys.version_info >= (3, 9), f"Python {sys.version.split()[0]} (3.9+ required)")
+    report(ENV.exists(), ".env exists")
+    if ENV.exists():
+        report(ENV.stat().st_mode & 0o077 == 0, ".env permissions are private")
+    for key, label, _ in CONFIG_FIELDS:
+        report(bool(os.environ.get(key) or _env.get(key)), f"{label} configured")
+
+    redirect = os.environ.get("WITHINGS_REDIRECT") or _env.get("WITHINGS_REDIRECT", "")
+    parsed = urlparse(redirect)
+    local_http = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1")
+    report(bool(parsed.netloc) and (parsed.scheme == "https" or local_http),
+           "Withings redirect URL is public HTTPS or local HTTP")
+
+    try:
+        state = json.loads(STATE.read_text())
+        withings_ready = all(state.get(key) for key in ("access_token", "refresh_token", "lastupdate"))
+    except (OSError, ValueError, AttributeError):
+        withings_ready = False
+    report(withings_ready, "Withings authorization completed")
+    report(Path(GARMIN_TOKENS).exists(), "Garmin login cached")
+    report(Path.home().joinpath("Library/LaunchAgents/com.local.withings-garmin-sync.plist").exists(),
+           "daily launchd job", optional=True)
+    return not problems
 
 
 def extract_code(pasted, expected_state):
@@ -148,12 +211,17 @@ def new_weights(state):
         params["offset"] = offset
 
 
-def push(readings, state):
+def garmin_login():
     from garminconnect import Garmin
 
     garmin = Garmin(cfg("GARMIN_EMAIL"), cfg("GARMIN_PASSWORD"),
                     prompt_mfa=lambda: input("Garmin MFA code: "))
     garmin.login(GARMIN_TOKENS)
+    return garmin
+
+
+def push(readings, state):
+    garmin = garmin_login()
     uploaded = set(state.get("uploaded", []))
     for epoch, reading_id, reading in readings:
         stamp = datetime.fromtimestamp(epoch)
@@ -221,8 +289,10 @@ def auth(pasted=None):
         print(f"authorize here:\n{url}\n")
         webbrowser.open(url)
         if not local_callback:
-            sys.exit(f"then, within ~30s:\n  {sys.argv[0]} auth '<the redirect URL>'")
-        code = catch_code(oauth_state, redirect)
+            pasted = input("After authorizing, paste the final redirect URL here:\n> ")
+            code = extract_code(pasted, oauth_state)
+        else:
+            code = catch_code(oauth_state, redirect)
 
     state = token(
         grant_type="authorization_code", code=code, redirect_uri=redirect
@@ -334,5 +404,15 @@ if __name__ == "__main__":
         auth(*sys.argv[2:3])
     elif args == ["selftest"]:
         selftest()
+    elif args == ["configure"]:
+        configure()
+    elif args == ["garmin-auth"]:
+        garmin_login()
+        print(f"Garmin login cached in {GARMIN_TOKENS}")
+    elif args == ["doctor"]:
+        sys.exit(0 if doctor() else 1)
     else:
-        sys.exit(f"usage: {sys.argv[0]} [sync | auth [redirect-url] | selftest]")
+        sys.exit(
+            f"usage: {sys.argv[0]} "
+            "[sync | auth [redirect-url] | garmin-auth | configure | doctor | selftest]"
+        )

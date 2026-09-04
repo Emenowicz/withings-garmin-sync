@@ -5,50 +5,54 @@
 Pulls new weight and body-composition measurements from Withings and posts them to Garmin Connect.
 Runs daily at 09:00 via launchd (edit `StartCalendarInterval` in the plist to change).
 
-## Setup
+## Quick start
 
-1. **Install dependencies.**
+Requirements: macOS and Python 3.9 or newer.
 
-   ```sh
-   sh setup.sh
-   ```
-
-   This creates `.env` from the included example if needed.
-
-2. **Withings credentials.** Register an OAuth app at
-   https://account.withings.com/partner/add_oauth2 and put its three `WITHINGS_*` values
-   in `.env`. Note Withings rejects `localhost` callbacks (it HEAD-checks the URL on
-   save), so a registration of your own needs a public HTTPS URL; `sync.py auth` handles
-   both that and a localhost callback.
-
-3. **Garmin credentials.** Put `GARMIN_EMAIL` / `GARMIN_PASSWORD` in `.env`
-   (`chmod 600`). Garmin has no official write API — `garminconnect` logs in like the
-   mobile app. Unofficial, so Garmin can break it whenever they like.
-
-4. **Authorize Withings:**
+1. Download the project:
 
    ```sh
-   .venv/bin/python sync.py auth                  # prints the authorize URL
-   .venv/bin/python sync.py auth '<redirect URL>' # paste it back within ~30s
+   git clone https://github.com/Emenowicz/withings-garmin-sync.git
+   cd withings-garmin-sync
    ```
 
-5. **First sync must run in a real terminal** — Garmin asks for an emailed MFA code and
-   there's no way to type it from a non-interactive shell:
+2. Register an OAuth app at https://account.withings.com/partner/add_oauth2. Keep its
+   client ID, client secret, and exact redirect URL ready. If the dashboard rejects a
+   localhost callback, use a public HTTPS URL you control.
 
-   ```sh
-   .venv/bin/python sync.py
-   ```
-
-   Tokens then cache in `~/.garminconnect` and every later run is unattended.
-   Repeated login attempts get you a 429 IP rate limit from Garmin; wait it out.
-   `sync.py sync` is the equivalent explicit command.
-
-6. **Schedule it:**
+3. Run the guided setup:
 
    ```sh
    sh setup.sh --launchd
+   ```
+
+   The wizard installs dependencies, asks for Withings and Garmin credentials, opens
+   Withings authorization, performs the first Garmin login (including MFA), tests a sync,
+   and installs the daily 09:00 job. Existing values are kept when you press Enter.
+
+4. Confirm the installation:
+
+   ```sh
+   .venv/bin/python sync.py doctor
    tail -f sync.log
    ```
+
+Run `sh setup.sh` without `--launchd` if you want to sync manually. The wizard stores
+credentials in a private `.env` file and caches Garmin login tokens in
+`~/.garminconnect`. Garmin has no official write API, so the integration can break when
+Garmin changes its private endpoints. Repeated login attempts may cause a temporary 429
+rate limit.
+
+## Commands
+
+```text
+.venv/bin/python sync.py sync         synchronize new measurements
+.venv/bin/python sync.py auth         authorize Withings again
+.venv/bin/python sync.py garmin-auth  authenticate Garmin again
+.venv/bin/python sync.py configure    update credentials interactively
+.venv/bin/python sync.py doctor       check configuration and authorization
+.venv/bin/python sync.py selftest     run offline checks
+```
 
 ## Notes
 
