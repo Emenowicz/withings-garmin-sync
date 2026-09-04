@@ -222,7 +222,7 @@ def auth(pasted=None):
         webbrowser.open(url)
         if not local_callback:
             sys.exit(f"then, within ~30s:\n  {sys.argv[0]} auth '<the redirect URL>'")
-        code = catch_code(oauth_state)
+        code = catch_code(oauth_state, redirect)
 
     state = token(
         grant_type="authorization_code", code=code, redirect_uri=redirect
@@ -235,12 +235,24 @@ def auth(pasted=None):
     print(f"wrote {STATE}")
 
 
-def catch_code(expected_state):
+def callback_address(redirect):
+    parsed = urlparse(redirect)
+    if parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1"):
+        sys.exit("local Withings callback must use http://localhost or http://127.0.0.1")
+    return parsed.hostname, parsed.port or 80, parsed.path or "/"
+
+
+def catch_code(expected_state, redirect):
     query = {}
+    host, port, expected_path = callback_address(redirect)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            query.update(parse_qs(urlparse(self.path).query))
+            request = urlparse(self.path)
+            if request.path != expected_path:
+                self.send_error(404)
+                return
+            query.update(parse_qs(request.query))
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"ok, close this tab")
@@ -248,7 +260,7 @@ def catch_code(expected_state):
         def log_message(self, *_):
             pass
 
-    with HTTPServer(("localhost", 8080), Handler) as server:
+    with HTTPServer((host, port), Handler) as server:
         while not query:
             server.handle_request()
     if "code" not in query:
@@ -290,6 +302,10 @@ def selftest():
     assert ledger == {"uploaded": ["20:900"]}
 
     assert extract_code("https://x.dev/cb?code=abc123&state=random", "random") == "abc123"
+    assert callback_address("http://localhost:8765/oauth/callback") == (
+        "localhost", 8765, "/oauth/callback"
+    )
+    assert callback_address("http://127.0.0.1") == ("127.0.0.1", 80, "/")
     try:
         extract_code("https://x.dev/cb?code=abc123&state=wrong", "random")
         assert False, "mismatched OAuth state accepted"
@@ -311,10 +327,12 @@ def selftest():
 
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    if cmd == "auth":
+    args = sys.argv[1:]
+    if not args or args == ["sync"]:
+        sync()
+    elif args[0] == "auth" and len(args) <= 2:
         auth(*sys.argv[2:3])
-    elif cmd == "selftest":
+    elif args == ["selftest"]:
         selftest()
     else:
-        sync()
+        sys.exit(f"usage: {sys.argv[0]} [sync | auth [redirect-url] | selftest]")
