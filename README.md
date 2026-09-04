@@ -1,5 +1,7 @@
 # withings-garmin-sync
 
+[![CI](https://github.com/Emenowicz/withings-garmin-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Emenowicz/withings-garmin-sync/actions/workflows/ci.yml)
+
 Pulls new weight and body-composition measurements from Withings and posts them to Garmin Connect.
 Runs daily at 09:00 via launchd (edit `StartCalendarInterval` in the plist to change).
 
@@ -39,6 +41,7 @@ Runs daily at 09:00 via launchd (edit `StartCalendarInterval` in the plist to ch
 
    Tokens then cache in `~/.garminconnect` and every later run is unattended.
    Repeated login attempts get you a 429 IP rate limit from Garmin; wait it out.
+   `sync.py sync` is the equivalent explicit command.
 
 6. **Schedule it:**
 

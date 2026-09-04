@@ -16,9 +16,9 @@ python3 -m venv .venv
 
 if [ ! -e .env ]; then
   cp .env.example .env
-  chmod 600 .env
   echo "Created .env. Fill in your Withings and Garmin credentials before authorizing."
 fi
+chmod 600 .env
 
 if "$install_launchd"; then
   case "$(uname)" in
