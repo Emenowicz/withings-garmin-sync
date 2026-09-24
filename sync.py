@@ -2,7 +2,7 @@
 """Withings -> Garmin Connect body-composition sync.
 
   ./sync.py auth       one-time OAuth bootstrap (browser)
-  ./sync.py            push new weights (run from launchd)
+  ./sync.py            push new weights (run from launchd or cron)
   ./sync.py selftest   asserts, no network
 """
 
@@ -11,6 +11,7 @@ import getpass
 import json
 import os
 import secrets
+import subprocess
 import sys
 import time
 import webbrowser
@@ -128,9 +129,27 @@ def doctor():
         withings_ready = False
     report(withings_ready, "Withings authorization completed")
     report(Path(GARMIN_TOKENS).exists(), "Garmin login cached")
-    report(Path.home().joinpath("Library/LaunchAgents/com.local.withings-garmin-sync.plist").exists(),
-           "daily launchd job", optional=True)
+    report(Path.home().joinpath("Library/LaunchAgents/com.local.withings-garmin-sync.plist").exists()
+           or cron_scheduled(read_crontab(), HERE), "daily launchd or cron job", optional=True)
     return not problems
+
+
+def read_crontab():
+    try:
+        return subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+    except OSError:  # no cron installed
+        return ""
+
+
+def cron_scheduled(crontab, project_dir):
+    """True if an active crontab line runs sync.py from this project directory."""
+    root = str(project_dir)
+    for line in crontab.splitlines():
+        if line.lstrip().startswith("#") or "sync.py" not in line:
+            continue
+        if any(t == root or t.startswith(root + "/") for t in line.split()):
+            return True
+    return False
 
 
 def extract_code(pasted, expected_state):
@@ -395,6 +414,13 @@ def selftest():
     assert redirect_valid("http://localhost:8080")
     assert not redirect_valid("http://example.com/oauth/callback")
     assert not redirect_valid("not-a-url")
+    job = "0 9 * * * cd /home/pi/wgs && .venv/bin/python sync.py >> sync.log 2>&1"
+    assert cron_scheduled(job, Path("/home/pi/wgs"))
+    assert cron_scheduled("0 9 * * * /home/pi/wgs/.venv/bin/python /home/pi/wgs/sync.py",
+                          Path("/home/pi/wgs"))
+    assert not cron_scheduled("# " + job, Path("/home/pi/wgs"))
+    assert not cron_scheduled(job, Path("/home/pi/w"))
+    assert not cron_scheduled("", Path("/home/pi/wgs"))
     try:
         extract_code("https://x.dev/cb?code=abc123&state=wrong", "random")
         assert False, "mismatched OAuth state accepted"

@@ -7,7 +7,8 @@ Runs daily at 09:00 via launchd (edit `StartCalendarInterval` in the plist to ch
 
 ## Quick start
 
-Requirements: macOS and Python 3.9 or newer.
+Requirements: Python 3.9 or newer. The guided daily job uses macOS launchd; on Linux
+(e.g. a Raspberry Pi) schedule it with cron — see [Running on Linux](#running-on-linux-cron).
 
 1. Download the project:
 
@@ -42,6 +43,21 @@ credentials in a private `.env` file and caches Garmin login tokens in
 `~/.garminconnect`. Garmin has no official write API, so the integration can break when
 Garmin changes its private endpoints. Repeated login attempts may cause a temporary 429
 rate limit.
+
+## Running on Linux (cron)
+
+Run `sh setup.sh` (without `--launchd`), then add a daily job with `crontab -e`:
+
+```text
+0 9 * * * cd /path/to/withings-garmin-sync && .venv/bin/python sync.py >> sync.log 2>&1
+```
+
+Cron uses the system time zone. `sync.py doctor` reports the job once it is installed.
+
+To move an existing installation from another machine, first stop the job there —
+Withings rotates refresh tokens, so two machines syncing at once invalidate each other.
+Then copy `.env`, `state.json`, and `~/.garminconnect` to the new machine instead of
+authorizing again.
 
 ## Commands
 
